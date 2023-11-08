@@ -1,9 +1,14 @@
 extern crate libc;
 
-mod demo;
-
 use rgb::{RGB8, RGBA8};
+use serde::Deserialize;
 use std::ffi::{CStr, CString};
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Event {
+    Output { time: f64, data: String },
+}
 
 pub struct Vt {
     width: u32,
@@ -124,7 +129,7 @@ fn blend(fg: RGBA8, bg: RGBA8, ratio: u8) -> RGBA8 {
 }
 
 struct Frame {
-    time: u32,
+    time: f64,
     data: Vec<Vec<(char, avt::Pen)>>,
 }
 
@@ -140,34 +145,40 @@ pub extern "C" fn f0r_update(
     let cols = 81;
     let rows = 20;
 
+    // TODO: Only do this once, or when the file changes
     let mut vt = avt::Vt::builder()
         .size(cols, rows)
         .scrollback_limit(0)
         .build();
 
-    // TODO: Load from file
-    let frames: Vec<_> = demo::EVENTS
+    // TODO: Handle error
+    let file = std::fs::read_to_string(inst.path.to_str().unwrap()).unwrap();
+    let events: Vec<Event> = file
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    let frames: Vec<_> = events
         .iter()
-        .map(|event| {
-            vt.feed_str(event.data);
+        .map(|event| match event {
+            Event::Output { time, data } => {
+                vt.feed_str(&data);
 
-            let data = vt
-                .view()
-                .iter()
-                .map(|line| line.cells().collect())
-                .collect();
+                let data = vt
+                    .view()
+                    .iter()
+                    .map(|line| line.cells().collect())
+                    .collect();
 
-            Frame {
-                time: event.time,
-                data,
+                Frame { time: *time, data }
             }
         })
         .collect();
 
-    // TODO: Look up font in database...
+    // TODO: Glyph caching
     let font = include_bytes!("../font/ibm-plex-mono-latin-400-normal.ttf") as &[u8];
     let font = fontdue::Font::from_bytes(font, fontdue::FontSettings::default()).unwrap();
-    let font_size = 14.0;
+    let font_size = 16.0; // TODO: Param
 
     let size = (inst.width * inst.height) as usize;
     let advanced_width = font.metrics('0', font_size).width;
@@ -200,10 +211,15 @@ pub extern "C" fn f0r_update(
         .take(size)
         .collect();
 
-    let ms = (time * 1000.0).round() as u32;
+    let first_frame = Frame {
+        time: 0.0,
+        data: vec![],
+    };
 
-    // TODO: Handle error
-    let frame = frames.iter().find(|frame| frame.time >= ms).unwrap();
+    let frame = frames
+        .iter()
+        .rfind(|frame| frame.time <= time)
+        .unwrap_or(&first_frame);
 
     for (row, line) in frame.data.iter().enumerate() {
         for (col, (char, pen)) in line.iter().enumerate() {
