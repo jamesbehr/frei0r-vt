@@ -116,15 +116,19 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
                 .iter()
                 .filter_map(|event| match event {
                     Event::Output { time, data } => {
-                        vt.feed_str(&data);
+                        let (changed, _) = vt.feed_str(&data);
 
-                        let data = vt
-                            .lines()
-                            .iter()
-                            .map(|line| line.cells().collect())
-                            .collect();
+                        if changed.is_empty() {
+                            None
+                        } else {
+                            let data = vt
+                                .lines()
+                                .iter()
+                                .map(|line| line.cells().collect())
+                                .collect();
 
-                        Some(Frame { time: *time, data })
+                            Some(Frame { time: *time, data })
+                        }
                     }
                     _ => None,
                 })
@@ -301,7 +305,6 @@ pub extern "C" fn f0r_update(
         data: vec![],
     };
 
-    // TODO: Frame timing for long videos isn't working (should stick on last frame)
     let frame = inst
         .frames
         .iter()
