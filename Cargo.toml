@@ -1,0 +1,16 @@
+[package]
+name = "vt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vt"
+crate-type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "0.2"
+avt = { git = "https://github.com/asciinema/avt.git", tag = "v0.8.3" }
+fontdue = "0.7"
+rgb = "0.8"
