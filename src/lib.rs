@@ -8,6 +8,7 @@ use std::ffi::{CStr, CString};
 #[serde(tag = "type")]
 enum Event {
     Output { time: f64, data: String },
+    Unknown { time: f64, tag: String },
 }
 
 pub struct Vt {
@@ -102,21 +103,18 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
             let p = param as *const *const libc::c_char;
             inst.path = CStr::from_ptr(*p).into();
 
-            // TODO: Support custom asciinema file
-            // TODO: Params (load from file)
-            let cols = 81;
-            let rows = 20;
+            // TODO: Handle error
+            let file = parse_file(inst.path.to_str().unwrap()).unwrap();
+
             let mut vt = avt::Vt::builder()
-                .size(cols, rows)
+                .size(file.header.width, file.header.height)
                 .scrollback_limit(0)
                 .build();
 
-            // TODO: Handle error
-            // TODO: Watch file for changes
-            let file = std::fs::read_to_string(inst.path.to_str().unwrap()).unwrap();
             inst.frames = file
-                .lines()
-                .map(|line| match serde_json::from_str(line).unwrap() {
+                .events
+                .iter()
+                .filter_map(|event| match event {
                     Event::Output { time, data } => {
                         vt.feed_str(&data);
 
@@ -126,12 +124,80 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
                             .map(|line| line.cells().collect())
                             .collect();
 
-                        Frame { time, data }
+                        Some(Frame { time: *time, data })
                     }
+                    _ => None,
                 })
                 .collect();
         },
         _ => {}
+    }
+}
+
+#[derive(Debug)]
+enum Error {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    InvalidEventTime,
+    InvalidEvent,
+    EmptyFile,
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
+    }
+}
+
+#[derive(Deserialize)]
+struct Header {
+    width: usize,
+    height: usize,
+}
+
+struct Screencast {
+    header: Header,
+    events: Vec<Event>,
+}
+
+fn parse_file(path: &str) -> Result<Screencast, Error> {
+    let file = std::fs::read_to_string(path)?;
+
+    let mut lines = file.lines();
+    let first_line = lines.next().ok_or(Error::EmptyFile)?;
+
+    let header: Header = serde_json::from_str(first_line)?;
+    let events: Result<Vec<Event>, _> = lines.map(|line| parse_event(line)).collect();
+
+    Ok(Screencast {
+        header,
+        events: events?,
+    })
+}
+
+fn parse_event(line: &str) -> Result<Event, Error> {
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    let time = value[0].as_f64().ok_or(Error::InvalidEventTime)?;
+
+    match value[1].as_str() {
+        Some("o") => {
+            let data = value[2].as_str().ok_or(Error::InvalidEvent)?;
+            Ok(Event::Output {
+                time,
+                data: data.to_owned(),
+            })
+        }
+        Some(tag) => Ok(Event::Unknown {
+            time,
+            tag: tag.to_owned(),
+        }),
+        None => Err(Error::InvalidEvent),
     }
 }
 
