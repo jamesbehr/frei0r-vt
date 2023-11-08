@@ -14,6 +14,7 @@ pub struct Vt {
     width: u32,
     height: u32,
     path: CString,
+    frames: Vec<Frame>,
 }
 
 struct Theme {
@@ -82,6 +83,7 @@ pub extern "C" fn f0r_construct(width: u32, height: u32) -> *mut Vt {
         width,
         height,
         path,
+        frames: vec![],
     });
     Box::into_raw(inst)
 }
@@ -99,6 +101,35 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
         0 => unsafe {
             let p = param as *const *const libc::c_char;
             inst.path = CStr::from_ptr(*p).into();
+
+            // TODO: Support custom asciinema file
+            // TODO: Params (load from file)
+            let cols = 81;
+            let rows = 20;
+            let mut vt = avt::Vt::builder()
+                .size(cols, rows)
+                .scrollback_limit(0)
+                .build();
+
+            // TODO: Handle error
+            // TODO: Watch file for changes
+            let file = std::fs::read_to_string(inst.path.to_str().unwrap()).unwrap();
+            inst.frames = file
+                .lines()
+                .map(|line| match serde_json::from_str(line).unwrap() {
+                    Event::Output { time, data } => {
+                        vt.feed_str(&data);
+
+                        let data = vt
+                            .view()
+                            .iter()
+                            .map(|line| line.cells().collect())
+                            .collect();
+
+                        Frame { time, data }
+                    }
+                })
+                .collect();
         },
         _ => {}
     }
@@ -142,39 +173,6 @@ pub extern "C" fn f0r_update(
 ) {
     let inst = unsafe { &*inst };
 
-    let cols = 81;
-    let rows = 20;
-
-    // TODO: Only do this once, or when the file changes
-    let mut vt = avt::Vt::builder()
-        .size(cols, rows)
-        .scrollback_limit(0)
-        .build();
-
-    // TODO: Handle error
-    let file = std::fs::read_to_string(inst.path.to_str().unwrap()).unwrap();
-    let events: Vec<Event> = file
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-
-    let frames: Vec<_> = events
-        .iter()
-        .map(|event| match event {
-            Event::Output { time, data } => {
-                vt.feed_str(&data);
-
-                let data = vt
-                    .view()
-                    .iter()
-                    .map(|line| line.cells().collect())
-                    .collect();
-
-                Frame { time: *time, data }
-            }
-        })
-        .collect();
-
     // TODO: Glyph caching
     let font = include_bytes!("../font/ibm-plex-mono-latin-400-normal.ttf") as &[u8];
     let font = fontdue::Font::from_bytes(font, fontdue::FontSettings::default()).unwrap();
@@ -216,7 +214,8 @@ pub extern "C" fn f0r_update(
         data: vec![],
     };
 
-    let frame = frames
+    let frame = inst
+        .frames
         .iter()
         .rfind(|frame| frame.time <= time)
         .unwrap_or(&first_frame);
