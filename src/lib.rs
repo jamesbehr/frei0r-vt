@@ -16,6 +16,7 @@ pub struct Vt {
     height: u32,
     path: CString,
     frames: Vec<Frame>,
+    font: fontdue::Font,
 }
 
 struct Theme {
@@ -79,12 +80,54 @@ pub extern "C" fn f0r_get_param_info(info: *mut F0rParamInfo, index: libc::c_int
 
 #[no_mangle]
 pub extern "C" fn f0r_construct(width: u32, height: u32) -> *mut Vt {
+    let families = vec![
+        "Cascadia Code",
+        "JetBrains Mono",
+        "Fira Code",
+        "SF Mono",
+        "Menlo",
+        "Consolas",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "DejaVu Sans",
+        "Noto Emoji",
+    ];
+
+    let mut fonts = fontdb::Database::new();
+    fonts.load_system_fonts();
+
+    let families: Vec<fontdb::Family> = families
+        .iter()
+        .map(|name| fontdb::Family::Name(name.as_ref()))
+        .collect();
+
+    let query = fontdb::Query {
+        families: &families,
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    };
+
+    // TODO: Handle error
+    let font_id = fonts.query(&query).unwrap();
+    let font = fonts
+        .with_face_data(font_id, |font_data, face_index| {
+            let settings = fontdue::FontSettings {
+                collection_index: face_index,
+                ..Default::default()
+            };
+
+            fontdue::Font::from_bytes(font_data, settings).unwrap()
+        })
+        .unwrap();
+
     let path = CString::new("").unwrap();
     let inst = Box::new(Vt {
         width,
         height,
         path,
         frames: vec![],
+        font,
     });
     Box::into_raw(inst)
 }
@@ -258,14 +301,10 @@ pub extern "C" fn f0r_update(
 ) {
     let inst = unsafe { &*inst };
 
-    // TODO: Glyph caching
-    // TODO: Better font (extra chars)
-    let font = include_bytes!("../font/ibm-plex-mono-latin-400-normal.ttf") as &[u8];
-    let font = fontdue::Font::from_bytes(font, fontdue::FontSettings::default()).unwrap();
     let font_size = 16.0; // TODO: Param
 
     let size = (inst.width * inst.height) as usize;
-    let col_width = font.metrics('0', font_size).width;
+    let col_width = inst.font.metrics('0', font_size).width;
     let row_height = font_size * 1.3;
 
     let dim = Dimensions {
@@ -313,7 +352,7 @@ pub extern "C" fn f0r_update(
 
     for (row, line) in frame.data.iter().enumerate() {
         for (col, (char, pen)) in line.iter().enumerate() {
-            let (metrics, bitmap) = font.rasterize(*char, font_size);
+            let (metrics, bitmap) = inst.font.rasterize(*char, font_size);
 
             // Draw the background over the whole cell
             if let Some(c) = pen.background() {
