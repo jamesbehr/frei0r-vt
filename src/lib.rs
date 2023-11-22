@@ -116,7 +116,22 @@ impl Vt {
             (None, None) => &self.groups[..],
         };
 
-        let subtract = groups.first().map(|group| group.time).unwrap_or(0.0);
+        let subtract = if let Some(Cut {
+            start_immediately, ..
+        }) = self.cut
+        {
+            if start_immediately {
+                groups
+                    .first()
+                    .and_then(|group| group.frames.first())
+                    .map(|frame| frame.time)
+                    .unwrap_or(0.0)
+            } else {
+                groups.first().map(|group| group.time).unwrap_or(0.0)
+            }
+        } else {
+            0.0
+        };
 
         groups
             .iter()
