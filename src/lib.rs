@@ -4,19 +4,132 @@ use rgb::{RGB8, RGBA8};
 use serde::Deserialize;
 use std::ffi::{CStr, CString};
 
-#[derive(Deserialize)]
+const F0R_PLUGIN_TYPE_SOURCE: i32 = 1;
+const F0R_COLOR_MODEL_RGBA8888: i32 = 1;
+const FREI0R_MAJOR_VERSION: i32 = 1;
+const F0R_PARAM_BOOL: i32 = 0;
+const F0R_PARAM_COLOR: i32 = 2;
+const F0R_PARAM_STRING: i32 = 4;
+
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(tag = "type")]
 enum Event {
     Output { time: f64, data: String },
+    Marker { time: f64, data: String },
     Unknown { time: f64, tag: String },
+}
+
+impl Event {
+    fn is_marker(&self) -> bool {
+        match self {
+            Self::Marker { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct Cut {
+    // Marker to start the cut from. Play from the beginning of the file if omitted.
+    first_marker: Option<usize>,
+
+    // Marker to stop the cut at. Play to end of file if ommitted.
+    last_marker: Option<usize>,
+
+    // If true, the timing of all events after the specified marker is shifted such that there is
+    // no delay between starting playback and the first event.
+    start_immediately: bool,
 }
 
 pub struct Vt {
     width: u32,
     height: u32,
     path: CString,
-    frames: Vec<Frame>,
+    cut: Option<Cut>,
+    groups: Vec<FrameGroup>,
     font: fontdue::Font,
+}
+
+#[derive(Debug)]
+struct FrameGroup {
+    time: f64,
+    frames: Vec<Frame>,
+}
+
+impl Vt {
+    fn load(&mut self, file: Screencast) {
+        let mut vt = avt::Vt::builder()
+            .size(file.header.width, file.header.height)
+            .scrollback_limit(0)
+            .build();
+
+        self.groups = vec![];
+
+        let mut fg = FrameGroup {
+            time: 0.0,
+            frames: vec![],
+        };
+
+        for event in file.events {
+            match event {
+                Event::Output { time, data } => {
+                    let (changed, _) = vt.feed_str(&data);
+
+                    if !changed.is_empty() {
+                        let data = vt
+                            .lines()
+                            .iter()
+                            .map(|line| line.cells().collect())
+                            .collect();
+
+                        fg.frames.push(Frame { time, data })
+                    }
+                }
+                Event::Marker { time, .. } => {
+                    self.groups.push(fg);
+                    fg = FrameGroup {
+                        time,
+                        frames: vec![],
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        if !fg.frames.is_empty() {
+            self.groups.push(fg);
+        }
+    }
+
+    fn cut(&self) -> (Option<usize>, Option<usize>) {
+        match &self.cut {
+            Some(cut) => (cut.first_marker, cut.last_marker),
+            None => (None, None),
+        }
+    }
+
+    fn frame(&self, time: f64) -> Frame {
+        let groups = match self.cut() {
+            (Some(start), Some(end)) => &self.groups[start + 1..end + 1],
+            (Some(start), None) => &self.groups[start + 1..],
+            (None, Some(end)) => &self.groups[..end + 1],
+            (None, None) => &self.groups[..],
+        };
+
+        let subtract = groups.first().map(|group| group.time).unwrap_or(0.0);
+
+        groups
+            .iter()
+            .rfind(|group| group.time - subtract < time)
+            .and_then(|group| {
+                group
+                    .frames
+                    .iter()
+                    .rfind(|frame| frame.time - subtract <= time)
+            })
+            .unwrap_or(&Frame::new())
+            .clone()
+    }
 }
 
 struct Theme {
@@ -57,12 +170,12 @@ pub fn f0r_deinit() {}
 pub unsafe extern "C" fn f0r_get_plugin_info(info: *mut F0rPluginInfo) {
     (*info).name = b"VT\0".as_ptr() as *const libc::c_char;
     (*info).author = b"James Behr\0".as_ptr() as *const libc::c_char;
-    (*info).plugin_type = 1; // F0R_PLUGIN_TYPE_SOURCE
-    (*info).color_model = 1; // F0R_COLOR_MODEL_RGBA8888
-    (*info).frei0r_version = 1; // FREI0R_MAJOR_VERSION
+    (*info).plugin_type = F0R_PLUGIN_TYPE_SOURCE;
+    (*info).color_model = F0R_COLOR_MODEL_RGBA8888;
+    (*info).frei0r_version = FREI0R_MAJOR_VERSION;
     (*info).major_version = 0;
     (*info).minor_version = 1;
-    (*info).num_params = 1;
+    (*info).num_params = 2;
     (*info).explanation = b"Generates a VT terminal screencast\0".as_ptr() as *const libc::c_char;
 }
 
@@ -70,9 +183,15 @@ pub unsafe extern "C" fn f0r_get_plugin_info(info: *mut F0rPluginInfo) {
 pub extern "C" fn f0r_get_param_info(info: *mut F0rParamInfo, index: libc::c_int) {
     match index {
         0 => unsafe {
-            (*info).name = b"Path\0".as_ptr() as *const libc::c_char;
-            (*info).param_type = 4; // F0R_PARAM_STRING
-            (*info).explanation = b"Path to screencast file\0".as_ptr() as *const libc::c_char;
+            (*info).name = b"resource\0".as_ptr() as *const libc::c_char;
+            (*info).param_type = F0R_PARAM_STRING;
+            (*info).explanation = b"Path to asciicast file\0".as_ptr() as *const libc::c_char;
+        },
+        1 => unsafe {
+            (*info).name = b"cut\0".as_ptr() as *const libc::c_char;
+            (*info).param_type = F0R_PARAM_STRING;
+            (*info).explanation =
+                b"JSON formatted string describing cutting\0".as_ptr() as *const libc::c_char;
         },
         _ => {}
     }
@@ -126,7 +245,8 @@ pub extern "C" fn f0r_construct(width: u32, height: u32) -> *mut Vt {
         width,
         height,
         path,
-        frames: vec![],
+        cut: None,
+        groups: vec![],
         font,
     });
     Box::into_raw(inst)
@@ -142,40 +262,19 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
     let inst = unsafe { &mut *inst };
 
     match index {
-        0 => unsafe {
+        0 => {
+            let path = unsafe {
+                let p = param as *const *const libc::c_char;
+                CStr::from_ptr(*p)
+            };
+
+            let file = parse_file(path.to_str().unwrap()).unwrap();
+            inst.load(file);
+        }
+        1 => unsafe {
             let p = param as *const *const libc::c_char;
-            inst.path = CStr::from_ptr(*p).into();
-
-            // TODO: Handle error
-            let file = parse_file(inst.path.to_str().unwrap()).unwrap();
-
-            let mut vt = avt::Vt::builder()
-                .size(file.header.width, file.header.height)
-                .scrollback_limit(0)
-                .build();
-
-            inst.frames = file
-                .events
-                .iter()
-                .filter_map(|event| match event {
-                    Event::Output { time, data } => {
-                        let (changed, _) = vt.feed_str(&data);
-
-                        if changed.is_empty() {
-                            None
-                        } else {
-                            let data = vt
-                                .lines()
-                                .iter()
-                                .map(|line| line.cells().collect())
-                                .collect();
-
-                            Some(Frame { time: *time, data })
-                        }
-                    }
-                    _ => None,
-                })
-                .collect();
+            let cut: Cut = serde_json::from_str(CStr::from_ptr(*p).to_str().unwrap()).unwrap();
+            inst.cut = Some(cut);
         },
         _ => {}
     }
@@ -240,6 +339,13 @@ fn parse_event(line: &str) -> Result<Event, Error> {
                 data: data.to_owned(),
             })
         }
+        Some("m") => {
+            let data = value[2].as_str().ok_or(Error::InvalidEvent)?;
+            Ok(Event::Marker {
+                time,
+                data: data.to_owned(),
+            })
+        }
         Some(tag) => Ok(Event::Unknown {
             time,
             tag: tag.to_owned(),
@@ -272,9 +378,19 @@ fn blend(fg: RGBA8, bg: RGBA8, ratio: u8) -> RGBA8 {
     )
 }
 
+#[derive(Clone, Debug)]
 struct Frame {
     time: f64,
     data: Vec<Vec<(char, avt::Pen)>>,
+}
+
+impl Frame {
+    fn new() -> Frame {
+        Frame {
+            time: 0.0,
+            data: vec![],
+        }
+    }
 }
 
 struct Dimensions {
@@ -339,18 +455,7 @@ pub extern "C" fn f0r_update(
         .take(size)
         .collect();
 
-    let first_frame = Frame {
-        time: 0.0,
-        data: vec![],
-    };
-
-    let frame = inst
-        .frames
-        .iter()
-        .rfind(|frame| frame.time <= time)
-        .unwrap_or(&first_frame);
-
-    for (row, line) in frame.data.iter().enumerate() {
+    for (row, line) in inst.frame(time).data.iter().enumerate() {
         for (col, (char, pen)) in line.iter().enumerate() {
             let (metrics, bitmap) = inst.font.rasterize(*char, font_size);
 
