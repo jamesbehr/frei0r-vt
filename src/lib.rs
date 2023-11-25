@@ -103,12 +103,17 @@ impl Vt {
 
     fn cut(&self) -> (Option<usize>, Option<usize>) {
         match &self.cut {
+            // TODO: Check first_marker < last_marker
             Some(cut) => (cut.first_marker, cut.last_marker),
             None => (None, None),
         }
     }
 
     fn frame(&self, time: f64) -> Frame {
+        // if self.groups.len() == 0 {
+        //     return Frame::new();
+        // }
+
         let groups = match self.cut() {
             (Some(start), Some(end)) => &self.groups[start + 1..end + 1],
             (Some(start), None) => &self.groups[start + 1..],
@@ -280,11 +285,15 @@ pub extern "C" fn f0r_set_param_value(inst: *mut Vt, param: *mut libc::c_void, i
         0 => {
             let path = unsafe {
                 let p = param as *const *const libc::c_char;
-                CStr::from_ptr(*p)
+                CStr::from_ptr(*p).to_str().unwrap()
             };
 
-            let file = parse_file(path.to_str().unwrap()).unwrap();
-            inst.load(file);
+            // TODO: Only load if path changed
+            println!("{}", path);
+            if path != "<producer>" {
+                let file = parse_file(path).unwrap();
+                inst.load(file);
+            }
         }
         1 => unsafe {
             let p = param as *const *const libc::c_char;
